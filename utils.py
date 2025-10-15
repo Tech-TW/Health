@@ -49,18 +49,60 @@ def bp_category(sys, dia, cfg):
     return ("第 1 期", 3)
 
 def enrich_bp(df: pd.DataFrame) -> pd.DataFrame:
-    """把 DB 撈出的欄位加上 pp/map/category/cat_level 與 timezone-aware datetime"""
+    """
+    穩健版：
+    1) 無論 datetime 是 naive 或 tz-aware，都會先轉成 tz-aware UTC
+    2) 計算衍生欄位：脈壓(pp)、平均動脈壓(map)、分類(category/cat_level)
+    3) 不做本地時區顯示（顯示時再在頁面上 tz_convert(TZ)）
+    """
     out = df.copy()
+
+    # ---- 1) 轉成 tz-aware UTC ----
+    # 先 parse 成 timestamp；如果已 tz-aware -> 直接轉 UTC；如果是 naive -> 當成 UTC 再加 tz
     out["datetime"] = pd.to_datetime(out["datetime"], errors="coerce")
-    # 加時區僅用於顯示；資料庫內仍存 ISO 字串
-    out["datetime"] = out["datetime"].dt.tz_localize(TZ, nonexistent="NaT", ambiguous="NaT")
-    cfg = st.session_state.cfg["blood_pressure"]
-    out["pp"]  = out.apply(lambda r: pulse_pressure(r["systolic"], r["diastolic"]), axis=1)
-    out["map"] = out.apply(lambda r: mean_arterial_pressure(r["systolic"], r["diastolic"]), axis=1)
-    labels, levels = [], []
-    for s, d in zip(out["systolic"], out["diastolic"]):
-        label, lvl = bp_category(s, d, cfg)
-        labels.append(label); levels.append(lvl)
-    out["category"] = labels
-    out["cat_level"] = levels
+
+    # 兩段處理：tz-aware 與 naive 分開
+    mask_tzaware = out["datetime"].dt.tz.notna()
+    if mask_tzaware.any():
+        out.loc[mask_tzaware, "datetime"] = out.loc[mask_tzaware, "datetime"].dt.tz_convert("UTC")
+
+    mask_naive = out["datetime"].dt.tz.isna()
+    if mask_naive.any():
+        # 將 naive 視為 UTC 時間再補上 tz（若你舊資料其實是本地時間，改成 tz_localize(TZ).dt.tz_convert("UTC")）
+        out.loc[mask_naive, "datetime"] = (
+            out.loc[mask_naive, "datetime"].dt.tz_localize(TZ).dt.tz_convert("UTC")
+        )
+
+    # ---- 2) 衍生欄位 ----
+    # 脈壓（Pulse Pressure）與平均動脈壓（Mean Arterial Pressure）
+    # 確保數值欄位為數字
+    for col in ["systolic", "diastolic", "pulse"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    out["pp"] = out["systolic"] - out["diastolic"]
+    out["map"] = out["diastolic"] + (out["pp"] / 3.0)
+
+    # 分類（可以依你的門檻調整）
+    def _cat(row):
+        s, d = row["systolic"], row["diastolic"]
+        if pd.isna(s) or pd.isna(d):
+            return "Unknown", 99
+        # 這裡示範一組常見分級（可依需求調整）
+        if s < 120 and d < 80:
+            return "Normal", 0
+        if 120 <= s < 130 and d < 80:
+            return "Elevated", 1
+        if (130 <= s < 140) or (80 <= d < 90):
+            return "Hypertension Stage 1", 2
+        if (140 <= s) or (90 <= d):
+            return "Hypertension Stage 2", 3
+        return "Unknown", 99
+
+    cats = out.apply(_cat, axis=1, result_type="expand")
+    out["category"] = cats[0]
+    out["cat_level"] = cats[1]
+
+    # 確保依時間排序
+    out = out.sort_values("datetime").reset_index(drop=True)
     return out
