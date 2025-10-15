@@ -46,6 +46,10 @@ bp:
   pp: "Pulse Pressure (PP)"
   map: "Mean Arterial Pressure (MAP)"
   category: "Category"
+  edit_section: "📝 Edit / Delete"
+  save_changes: "Save table changes"
+  delete_selected: "Delete selected"
+  select_to_delete: "Check rows to delete (Delete)"
 
 common:
   language: "Language"
@@ -56,3 +60,5 @@ common:
   added: "Added!"
   cleared: "Cleared."
   download_all: "Download consolidated CSV"
+  saved: "Changes saved."
+  deleted: "Deleted {n} rows."
