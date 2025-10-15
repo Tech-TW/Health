@@ -37,7 +37,7 @@ with st.sidebar:
         df_all = db.list_bp(USER_ID)
         st.download_button(
             label=t("bp.export_csv"),
-            data=export_csv(df_all),
+            data=df_all.to_csv(index=False).encode("utf-8"),
             file_name="blood_pressure.csv",
             mime="text/csv"
         )
@@ -45,7 +45,7 @@ with st.sidebar:
 st.title(t("bp.page_title"))
 st.caption(t("bp.disclaimer"))
 
-# 新增紀錄
+# 新增紀錄（日期、時間、SYS、DIA、Pulse、服藥、備註）
 with st.expander(t("bp.add_panel"), expanded=True):
     with st.form("add_bp", clear_on_submit=True):
         left, right = st.columns([2,3])
@@ -65,6 +65,7 @@ with st.expander(t("bp.add_panel"), expanded=True):
                 "meds": meds, "note": note
             })
             st.success("Added!")
+            st.rerun()  # ★ 新增：立刻刷新，讓下面的最早日期/圖表更新
 
 # 取資料（僅此用戶）
 raw_df = db.list_bp(USER_ID)
@@ -73,18 +74,24 @@ if raw_df.empty:
     st.stop()
 df = enrich_bp(raw_df)
 
-# 篩選（僅日期）
+# —— 篩選（允許任意日期；預設起日 = 資料最早日期） ——
 st.subheader(t("bp.filter"))
 df_dt = pd.to_datetime(df["datetime"], errors="coerce")
 min_date = df_dt.dropna().min().date()
 max_date = df_dt.dropna().max().date()
-default_start = max(min_date, max_date - timedelta(days=30))
+
+# ★ 關鍵變更：預設起日用最早日期，不限近 30 天
+default_start = min_date
 
 c1, c2 = st.columns(2)
 with c1:
-    start = st.date_input(t("bp.start"), value=default_start, min_value=min_date, max_value=max_date)
+    start = st.date_input(t("bp.start"), value=default_start)  # 不設 min/max，讓你可往前挑
 with c2:
-    end = st.date_input(t("bp.end"), value=max_date, min_value=min_date, max_value=max_date)
+    end = st.date_input(t("bp.end"), value=max_date)           # 同上
+
+# 若不小心選反了，就自動交換
+if start > end:
+    start, end = end, start
 
 mask = (df_dt.dt.date >= start) & (df_dt.dt.date <= end)
 view = df.loc[mask].copy()
@@ -92,14 +99,16 @@ if view.empty:
     st.warning(t("bp.no_view"))
     st.stop()
 
-# 摘要
+# 指標摘要
 st.subheader(t("bp.summary"))
 last7  = view[view["datetime"] >= (view["datetime"].max() - pd.Timedelta(days=7))]
 last30 = view[view["datetime"] >= (view["datetime"].max() - pd.Timedelta(days=30))]
+
 def hit_rate(sub):
     if len(sub) == 0: return 0.0
     cfg = st.session_state.cfg["blood_pressure"]
     return 100.0 * ((sub["systolic"] < cfg["target_sys"]) & (sub["diastolic"] < cfg["target_dia"])).mean()
+
 cA, cB, cC = st.columns(3)
 with cA: st.metric(t("bp.hit7"), f"{hit_rate(last7):.1f}%")
 with cB: st.metric(t("bp.hit30"), f"{hit_rate(last30):.1f}%")
@@ -107,7 +116,7 @@ with cC:
     latest = view.iloc[-1]
     st.metric(t("bp.latest_reading"), f"{int(latest['systolic'])}/{int(latest['diastolic'])} mmHg", f"Pulse {int(latest['pulse'])} bpm")
 
-# 分布與圖表
+# 類別分布
 cat_counts = view["category"].value_counts().reset_index()
 cat_counts.columns = ["category","count"]
 st.altair_chart(
@@ -119,12 +128,16 @@ st.altair_chart(
     use_container_width=True
 )
 
+# 圖表
 st.subheader(t("bp.ts_title"))
-long = view.melt(id_vars=["datetime","category","cat_level"], value_vars=["systolic","diastolic"], var_name="type", value_name="mmHg")
+long = view.melt(id_vars=["datetime","category","cat_level"],
+                 value_vars=["systolic","diastolic"],
+                 var_name="type", value_name="mmHg")
 rules = pd.DataFrame({
     "label": [t("bp.target_sys"), t("bp.target_dia")],
     "type":  ["systolic", "diastolic"],
-    "mmHg":  [st.session_state.cfg["blood_pressure"]["target_sys"], st.session_state.cfg["blood_pressure"]["target_dia"]],
+    "mmHg":  [st.session_state.cfg["blood_pressure"]["target_sys"],
+              st.session_state.cfg["blood_pressure"]["target_dia"]],
 })
 line = alt.Chart(long).mark_line(point=True).encode(
     x=alt.X("datetime:T", title="Time"),
@@ -135,7 +148,11 @@ line = alt.Chart(long).mark_line(point=True).encode(
              alt.Tooltip("mmHg:Q", title="mmHg"),
              "category"]
 )
-rule = alt.Chart(rules).mark_rule(strokeDash=[4,4]).encode(y="mmHg:Q", color=alt.Color("type:N", legend=None))
+rule = alt.Chart(rules).mark_rule(strokeDash=[4,4]).encode(
+    y="mmHg:Q",
+    color=alt.Color("type:N", legend=None),
+    tooltip=["label","mmHg"]
+)
 st.altair_chart((line + rule).interactive(), use_container_width=True)
 
 st.subheader(t("bp.hr_title"))
@@ -148,7 +165,27 @@ st.altair_chart(
     use_container_width=True
 )
 
-# 明細 + 編輯/刪除（僅自己資料）
+# 明細
+st.subheader(t("bp.table_title"))
+disp = view.copy()
+label_dt = "日期時間" if get_lang()=="zh-TW" else "Datetime"
+disp[label_dt] = disp["datetime"].dt.tz_convert(TZ).dt.strftime("%Y-%m-%d %H:%M")
+disp = disp[["id", label_dt, "systolic", "diastolic", "pulse", "pp", "map", "category", "meds", "note"]]
+st.dataframe(
+    disp.rename(columns={
+        "systolic": t("bp.systolic_short"),
+        "diastolic": t("bp.diastolic_short"),
+        "pulse": t("bp.pulse_short"),
+        "pp": t("bp.pp"),
+        "map": t("bp.map"),
+        "category": t("bp.category"),
+        "meds": t("bp.meds"),
+        "note": t("bp.note"),
+    }),
+    use_container_width=True, hide_index=True
+)
+
+# 編輯/刪除（保留原本機制）
 st.subheader("📝 編輯 / 刪除")
 edit_df = view[["id","datetime","systolic","diastolic","pulse","meds","note"]].copy()
 edit_df["datetime"] = pd.to_datetime(edit_df["datetime"]).dt.strftime("%Y-%m-%d %H:%M:%S")
