@@ -7,14 +7,13 @@ from i18n import t, set_lang, get_lang
 st.set_page_config(page_title=t("app.title"), page_icon="💚", layout="wide")
 init_state()
 
-# ---- URL 參數語言（?lang=en） ----
+# URL 語言參數
 qp = st.query_params
 if "lang" in qp:
     set_lang(qp["lang"])
 else:
     set_lang(get_lang())
 
-# 側邊欄語言切換 + 同步 URL
 with st.sidebar:
     lang_options = [("zh-TW", t("common.lang_zh")), ("en", t("common.lang_en"))]
     idx_map = {"zh-TW":0, "en":1}
@@ -43,10 +42,10 @@ with col1:
         st.metric(t("bp.latest_reading"),
                   f"{int(latest['systolic'])}/{int(latest['diastolic'])} mmHg",
                   f"Pulse {int(latest['pulse'])} bpm")
-        page_link("pages/01_🩺_血壓紀錄.py", t("app.goto_bp"))
+        page_link("pages/01_血壓紀錄.py", t("app.goto_bp"))
     else:
         st.write(t("app.no_data_export"))
-        page_link("pages/01_🩺_血壓紀錄.py", t("app.add_one"))
+        page_link("pages/01_血壓紀錄.py", t("app.add_one"))
 
 with col2:
     st.subheader(t("app.nav_weight"))
