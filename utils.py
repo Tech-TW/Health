@@ -5,12 +5,11 @@ import numpy as np
 from datetime import datetime
 from dateutil import tz
 
-# ====== 全域設定 ======
 TZ = tz.gettz("Asia/Taipei")
 
 def init_state():
     if "metrics" not in st.session_state:
-        st.session_state.metrics = {}  # dict[str, pd.DataFrame]
+        st.session_state.metrics = {}
     if "cfg" not in st.session_state:
         st.session_state.cfg = {
             "blood_pressure": default_cfg_bp()
@@ -23,7 +22,6 @@ def export_csv(df: pd.DataFrame) -> bytes:
     buf = df.copy()
     if "datetime" in buf.columns and pd.api.types.is_datetime64_any_dtype(buf["datetime"]):
         try:
-            # 若已有時區 -> 轉台北＆格式化；若無時區 -> 直接格式化
             if pd.api.types.is_datetime64tz_dtype(buf["datetime"]):
                 buf["datetime"] = buf["datetime"].dt.tz_convert(TZ)
             buf["datetime"] = pd.to_datetime(buf["datetime"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -34,7 +32,7 @@ def export_csv(df: pd.DataFrame) -> bytes:
 def parse_local_datetime(date_val, time_val):
     return datetime.combine(date_val, time_val).replace(tzinfo=TZ)
 
-# ====== 血壓門檻 ======
+# ---- BP helpers ----
 def default_cfg_bp():
     return dict(
         normal_sys=120, normal_dia=80,
@@ -70,7 +68,7 @@ def bp_category(sys, dia, cfg):
     return ("第 1 期", 3)
 
 def normalize_bp_df(df: pd.DataFrame) -> pd.DataFrame:
-    """將外部或新輸入資料 -> 標準血壓 schema"""
+    """標準血壓 schema：datetime, systolic, diastolic, pulse, meds, note, pp, map, category, cat_level"""
     df = df.copy()
     mapping = {
         "datetime":"datetime","日期時間":"datetime",
@@ -79,10 +77,6 @@ def normalize_bp_df(df: pd.DataFrame) -> pd.DataFrame:
         "systolic":"systolic","收縮壓":"systolic","SYS":"systolic",
         "diastolic":"diastolic","舒張壓":"diastolic","DIA":"diastolic",
         "pulse":"pulse","心跳":"pulse","HR":"pulse","脈搏":"pulse",
-        "period":"period","時段":"period",
-        "position":"position","姿勢":"position",
-        "arm":"arm","手臂":"arm",
-        "place":"place","場所":"place",
         "meds":"meds","服藥":"meds",
         "note":"note","備註":"note",
     }
@@ -118,7 +112,7 @@ def normalize_bp_df(df: pd.DataFrame) -> pd.DataFrame:
             out[std] = df[src]
 
     # 補齊
-    for c in ["systolic","diastolic","pulse","period","position","arm","place","meds","note"]:
+    for c in ["systolic","diastolic","pulse","meds","note"]:
         if c not in out.columns:
             out[c] = np.nan if c in ["systolic","diastolic","pulse"] else ""
 
@@ -142,10 +136,8 @@ def normalize_bp_df(df: pd.DataFrame) -> pd.DataFrame:
     out = out.sort_values("datetime").reset_index(drop=True)
     return out
 
-# ---- 內部頁面導覽（新舊版 Streamlit 相容處理） ----
 def page_link(path: str, label: str):
     try:
-        # Streamlit v1.31+ 提供
         st.page_link(path, label=label, use_container_width=True)
     except Exception:
         st.link_button(label, path, use_container_width=True)
