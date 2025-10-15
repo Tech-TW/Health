@@ -55,10 +55,11 @@ with st.sidebar:
                     st.error("Password too short.")
                 else:
                     try:
-                        uid = db.create_user(email2, name2 or email2.split("@")[0], pwd2)
+                        uid = db.create_user(email2, name2 or email2.split("@")[0], pwd2)  # ← 不再報 72 bytes
                         st.success("Account created. Please login.")
                     except Exception as e:
                         st.error(f"Sign up failed: {e}")
+
 
 st.title("💚 " + t("app.title"))
 st.caption(t("app.subtitle"))
