@@ -46,6 +46,10 @@ bp:
   pp: "脈壓(PP)"
   map: "平均動脈壓(MAP)"
   category: "分類"
+  edit_section: "📝 編輯 / 刪除"
+  save_changes: "儲存表格變更"
+  delete_selected: "刪除勾選列"
+  select_to_delete: "勾選欲刪除的列（Delete）"
 
 common:
   language: "語言"
@@ -56,3 +60,5 @@ common:
   added: "已新增！"
   cleared: "已清空。"
   download_all: "下載 CSV 匯總"
+  saved: "已儲存變更。"
+  deleted: "已刪除 {n} 筆。"
