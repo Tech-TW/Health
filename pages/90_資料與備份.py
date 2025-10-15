@@ -1,4 +1,4 @@
-# pages/90_📦_資料與備份.py
+# pages/90_資料與備份.py
 import streamlit as st
 import pandas as pd
 from utils import init_state, export_csv, normalize_bp_df
@@ -27,7 +27,7 @@ else:
     )
 
 st.divider()
-st.subheader("Import from CSV (now supports: Blood Pressure)")
+st.subheader("Import from CSV (supports: Blood Pressure)")
 up = st.file_uploader("Choose CSV", type=["csv"])
 metric_sel = st.selectbox("Import to module", ["blood_pressure"], index=0)
 if up and st.button("Import"):
