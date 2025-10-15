@@ -11,17 +11,13 @@ app:
 
 bp:
   page_title: "🩺 Blood Pressure"
-  disclaimer: "For self-tracking and visualization **only** (not medical advice). If you see a hypertensive crisis (≥180/≥120 mmHg), seek medical care."
+  disclaimer: "For self-tracking and visualization **only** (not medical advice). If ≥180/≥120 mmHg, seek medical care."
   add_panel: "➕ Add a record"
   date: "Date"
   time: "Time"
   systolic: "Systolic (SYS, mmHg)"
   diastolic: "Diastolic (DIA, mmHg)"
   pulse: "Pulse (bpm)"
-  period: "Period"
-  position: "Position"
-  arm: "Arm"
-  place: "Place"
   meds: "Medication (leave blank if none)"
   note: "Note"
   add_btn: "Add"
@@ -60,9 +56,3 @@ common:
   added: "Added!"
   cleared: "Cleared."
   download_all: "Download consolidated CSV"
-
-choices:
-  periods: ["Morning","Midday","Evening","Bedtime","Other"]
-  positions: ["Seated","Standing","Supine"]
-  arms: ["Left","Right"]
-  places: ["Home","Clinic","Hospital","Work","Other"]
