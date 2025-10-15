@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-from datetime import datetime, timedelta
+from datetime import datetime
 from utils import (
     init_state, TZ, export_csv, default_cfg_bp, enrich_bp
 )
@@ -20,6 +20,16 @@ def require_login():
 require_login()
 USER_ID = st.session_state["user"]["id"]
 
+# ── 安全：文字淨化與長度限制
+def sanitize_text(s: str | None, max_len=120) -> str:
+    if not s: return ""
+    s = str(s).strip()[:max_len]
+    low = s.lower()
+    banned = ["<script", "</", "javascript:", "data:", "vbscript:", "onerror", "onload", "http://", "https://"]
+    if any(b in low for b in banned):
+        return "[redacted]"
+    return s
+
 # 側欄：設定/匯出
 with st.sidebar:
     st.header("⚙️ 設定")
@@ -33,13 +43,16 @@ with st.sidebar:
 
     st.divider()
     st.subheader(t("bp.export_csv"))
-    if st.button("Export my BP CSV"):
-        df_all = db.list_bp(USER_ID)
+    # 直接提供下載按鈕（不經 st.button），檔名包含時間戳
+    df_all = db.list_bp(USER_ID)
+    if not df_all.empty:
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         st.download_button(
             label=t("bp.export_csv"),
             data=df_all.to_csv(index=False).encode("utf-8"),
-            file_name="blood_pressure.csv",
-            mime="text/csv"
+            file_name=f"blood_pressure_{ts}.csv",
+            mime="text/csv",
+            use_container_width=True
         )
 
 st.title(t("bp.page_title"))
@@ -50,46 +63,53 @@ with st.expander(t("bp.add_panel"), expanded=True):
     with st.form("add_bp", clear_on_submit=True):
         left, right = st.columns([2,3])
         with left:
-            d = st.date_input(t("bp.date"), value=datetime.now(TZ).date())
-            tv = st.time_input(t("bp.time"), value=datetime.now(TZ).time().replace(microsecond=0))
+            local_now = datetime.now(TZ)
+            d = st.date_input(t("bp.date"), value=local_now.date())
+            tv = st.time_input(t("bp.time"), value=local_now.time().replace(microsecond=0))
             sys  = st.number_input(t("bp.systolic"), 60, 260, 120)
             dia  = st.number_input(t("bp.diastolic"), 40, 160, 80)
-            pulse= st.number_input(t("bp.pulse"), 30, 200, 70)
+            pulse= st.number_input(t("bp.pulse"), 30, 220, 70)
         with right:
-            meds = st.text_input(t("bp.meds"), value="")
-            note = st.text_input(t("bp.note"), value="")
+            meds = sanitize_text(st.text_input(t("bp.meds"), value=""), max_len=50)
+            note = sanitize_text(st.text_input(t("bp.note"), value=""), max_len=120)
+
         if st.form_submit_button(t("bp.add_btn")):
+            # 轉 UTC ISO8601（儲存一律 UTC）
+            local_dt = TZ.localize(datetime.combine(d, tv)) if getattr(TZ, 'localize', None) else datetime.combine(d, tv).astimezone(TZ)
+            utc_dt = local_dt.astimezone(pd.Timestamp.utcnow().tz)
+            dt_iso = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
             db.add_bp(USER_ID, {
-                "datetime": datetime.combine(d, tv).strftime("%Y-%m-%d %H:%M:%S"),
-                "systolic": sys, "diastolic": dia, "pulse": pulse,
+                "datetime": dt_iso,
+                "systolic": float(sys), "diastolic": float(dia), "pulse": float(pulse),
                 "meds": meds, "note": note
             })
             st.success("Added!")
-            st.rerun()  # ★ 新增：立刻刷新，讓下面的最早日期/圖表更新
+            st.rerun()  # 立刻刷新
 
 # 取資料（僅此用戶）
 raw_df = db.list_bp(USER_ID)
 if raw_df.empty:
     st.info(t("bp.no_data"))
     st.stop()
-df = enrich_bp(raw_df)
+
+# 將 datetime 解析為帶時區的 Timestamp（UTC → 本地顯示時再轉）
+df = raw_df.copy()
+df["datetime"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+df = enrich_bp(df)  # 你原有的衍生欄位（pp、map、category 等）
 
 # —— 篩選（允許任意日期；預設起日 = 資料最早日期） ——
 st.subheader(t("bp.filter"))
-df_dt = pd.to_datetime(df["datetime"], errors="coerce")
+df_dt = df["datetime"].dt.tz_convert(TZ)
 min_date = df_dt.dropna().min().date()
 max_date = df_dt.dropna().max().date()
-
-# ★ 關鍵變更：預設起日用最早日期，不限近 30 天
 default_start = min_date
 
 c1, c2 = st.columns(2)
 with c1:
-    start = st.date_input(t("bp.start"), value=default_start)  # 不設 min/max，讓你可往前挑
+    start = st.date_input(t("bp.start"), value=default_start)
 with c2:
-    end = st.date_input(t("bp.end"), value=max_date)           # 同上
+    end = st.date_input(t("bp.end"), value=max_date)
 
-# 若不小心選反了，就自動交換
 if start > end:
     start, end = end, start
 
@@ -128,11 +148,13 @@ st.altair_chart(
     use_container_width=True
 )
 
-# 圖表
+# 收縮/舒張壓時間序列 + 目標線
 st.subheader(t("bp.ts_title"))
-long = view.melt(id_vars=["datetime","category","cat_level"],
-                 value_vars=["systolic","diastolic"],
-                 var_name="type", value_name="mmHg")
+long = view.melt(
+    id_vars=["datetime","category","cat_level"],
+    value_vars=["systolic","diastolic"],
+    var_name="type", value_name="mmHg"
+)
 rules = pd.DataFrame({
     "label": [t("bp.target_sys"), t("bp.target_dia")],
     "type":  ["systolic", "diastolic"],
@@ -155,6 +177,7 @@ rule = alt.Chart(rules).mark_rule(strokeDash=[4,4]).encode(
 )
 st.altair_chart((line + rule).interactive(), use_container_width=True)
 
+# 心跳
 st.subheader(t("bp.hr_title"))
 st.altair_chart(
     alt.Chart(view).mark_line(point=True).encode(
@@ -165,7 +188,7 @@ st.altair_chart(
     use_container_width=True
 )
 
-# 明細
+# 明細表（本地時區顯示）
 st.subheader(t("bp.table_title"))
 disp = view.copy()
 label_dt = "日期時間" if get_lang()=="zh-TW" else "Datetime"
@@ -185,15 +208,16 @@ st.dataframe(
     use_container_width=True, hide_index=True
 )
 
-# 編輯/刪除（保留原本機制）
+# 編輯/刪除
 st.subheader("📝 編輯 / 刪除")
 edit_df = view[["id","datetime","systolic","diastolic","pulse","meds","note"]].copy()
-edit_df["datetime"] = pd.to_datetime(edit_df["datetime"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+# 編輯用字串（本地時區可視需求轉換；此處維持 ISO UTC 字串以避免混亂）
+edit_df["datetime"] = pd.to_datetime(edit_df["datetime"], utc=True).dt.strftime("%Y-%m-%d %H:%M:%S")
 edited = st.data_editor(
     edit_df, num_rows="fixed", hide_index=True, use_container_width=True,
     column_config={
         "id": st.column_config.NumberColumn("ID", disabled=True),
-        "datetime": st.column_config.TextColumn("Datetime (YYYY-MM-DD HH:MM:SS)"),
+        "datetime": st.column_config.TextColumn("Datetime (YYYY-MM-DD HH:MM:SS, UTC)"),
         "systolic": st.column_config.NumberColumn("Systolic", step=1),
         "diastolic": st.column_config.NumberColumn("Diastolic", step=1),
         "pulse": st.column_config.NumberColumn("Pulse", step=1),
@@ -216,14 +240,23 @@ with c1:
             (merged["note"]      != merged["note_old"])
         ]
         for _, r in changed.iterrows():
-            db.update_bp(USER_ID, int(r["id"]), {
-                "datetime": str(r["datetime"]),
-                "systolic": float(r["systolic"]),
-                "diastolic": float(r["diastolic"]),
-                "pulse": float(r["pulse"]),
-                "meds": r["meds"] or "",
-                "note": r["note"] or "",
-            })
+            # 重新淨化
+            meds_upd = sanitize_text(r["meds"] or "", max_len=50)
+            note_upd = sanitize_text(r["note"] or "", max_len=120)
+            # 轉回 ISO UTC
+            try:
+                dt_utc = pd.to_datetime(r["datetime"], utc=True, errors="coerce")
+                dt_iso = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ") if pd.notna(dt_utc) else None
+            except Exception:
+                dt_iso = None
+            fields = {}
+            if dt_iso: fields["datetime"] = dt_iso
+            fields["systolic"]  = float(r["systolic"])
+            fields["diastolic"] = float(r["diastolic"])
+            fields["pulse"]     = float(r["pulse"])
+            fields["meds"]      = meds_upd
+            fields["note"]      = note_upd
+            db.update_bp(USER_ID, int(r["id"]), fields)
         st.success("已儲存變更。")
 with c2:
     to_del = st.multiselect("勾選欲刪除的列（ID）", options=edited["id"].tolist())
