@@ -25,7 +25,6 @@ def get_lang() -> str:
     return st.session_state.get("lang", DEFAULT_LANG)
 
 def t(key: str, **kwargs):
-    """e.g. t('bp.page_title')；支援 format：t('common.import_success', n=3)"""
     data = _load_lang(get_lang())
     cur = data
     for part in key.split("."):
