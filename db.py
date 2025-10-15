@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional, Dict, Any
 import pandas as pd
-from passlib.hash import bcrypt, bcrypt_sha256  # ← 加入 bcrypt_sha256
+from passlib.hash import argon2, bcrypt, bcrypt_sha256
 
 DB_PATH = Path("healthhub.db")
 
@@ -24,7 +24,7 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     );
     """)
-    # 血壓表（含 user_id）
+    # 血壓表（含 user_id 外鍵）
     conn.execute("""
     CREATE TABLE IF NOT EXISTS blood_pressure (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,7 +38,7 @@ def init_db():
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     """)
-    # 舊表升級容錯
+    # 舊表升級容錯（若缺欄位就補）
     try:
         conn.execute("ALTER TABLE blood_pressure ADD COLUMN user_id INTEGER;")
         conn.execute("UPDATE blood_pressure SET user_id = 1 WHERE user_id IS NULL;")
@@ -47,21 +47,55 @@ def init_db():
     conn.commit()
     conn.close()
 
-# -------- 密碼雜湊工具（支援長密碼 & 舊雜湊） --------
+# ---------- 密碼雜湊：新帳號一律 Argon2；相容舊 bcrypt / bcrypt_sha256 ----------
 def _hash_password(password: str) -> str:
-    # bcrypt_sha256 不受 72 bytes 限制
-    return bcrypt_sha256.hash(password)
+    # Argon2 沒有 72 bytes 限制
+    return argon2.hash(password)
+
+def _identify_scheme(ph: str) -> str:
+    # 回傳 'argon2' / 'bcrypt_sha256' / 'bcrypt' / 'unknown'
+    try:
+        if argon2.identify(ph):
+            return "argon2"
+    except Exception:
+        pass
+    try:
+        if bcrypt_sha256.identify(ph):
+            return "bcrypt_sha256"
+    except Exception:
+        pass
+    try:
+        if bcrypt.identify(ph):
+            return "bcrypt"
+    except Exception:
+        pass
+    return "unknown"
 
 def _verify_password(password: str, password_hash: str) -> bool:
-    # 兼容舊帳號（純 bcrypt）與新帳號（bcrypt_sha256）
+    scheme = _identify_scheme(password_hash)
     try:
-        if bcrypt_sha256.identify(password_hash):
+        if scheme == "argon2":
+            return argon2.verify(password, password_hash)
+        if scheme == "bcrypt_sha256":
             return bcrypt_sha256.verify(password, password_hash)
-        if bcrypt.identify(password_hash):
+        if scheme == "bcrypt":
             return bcrypt.verify(password, password_hash)
     except Exception:
         return False
     return False
+
+def maybe_upgrade_password(user_id: int, password: str, password_hash: str):
+    """登入成功後，若是舊雜湊（bcrypt*/…），就升級成 argon2。"""
+    if _identify_scheme(password_hash) != "argon2":
+        try:
+            new_hash = _hash_password(password)
+            conn = get_conn()
+            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user_id))
+            conn.commit()
+            conn.close()
+        except Exception:
+            # 升級失敗不阻斷登入流程
+            pass
 
 # ---------- 使用者 ----------
 def create_user(email: str, name: str, password: str) -> int:
@@ -69,7 +103,7 @@ def create_user(email: str, name: str, password: str) -> int:
     name = (name or "").strip() or email.split("@")[0]
     if len(password) < 6:
         raise ValueError("Password too short")
-    ph = _hash_password(password)
+    ph = _hash_password(password)  # Argon2
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -104,8 +138,8 @@ def add_bp(user_id: int, rec: Dict[str, Any]) -> int:
     cur.execute("""
         INSERT INTO blood_pressure (user_id, datetime, systolic, diastolic, pulse, meds, note)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, rec["datetime"], rec["systolic"], rec["diastolic"],
-          rec["pulse"], rec.get("meds",""), rec.get("note","")))
+    """, (user_id, rec["datetime"], rec["systolic"], rec["diastolic"], rec["pulse"],
+          rec.get("meds",""), rec.get("note","")))
     conn.commit()
     rid = cur.lastrowid
     conn.close()
@@ -114,8 +148,7 @@ def add_bp(user_id: int, rec: Dict[str, Any]) -> int:
 def update_bp(user_id: int, rec_id: int, fields: Dict[str, Any]):
     keys, vals = [], []
     for k, v in fields.items():
-        keys.append(f"{k} = ?")
-        vals.append(v)
+        keys.append(f"{k} = ?"); vals.append(v)
     vals.extend([user_id, rec_id])
     sql = f"UPDATE blood_pressure SET {', '.join(keys)} WHERE user_id = ? AND id = ?"
     conn = get_conn()
