@@ -3,13 +3,18 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional, Dict, Any
 import pandas as pd
-from passlib.hash import argon2, bcrypt, bcrypt_sha256
+from passlib.hash import argon2 as _argon2, bcrypt, bcrypt_sha256
 
 DB_PATH = Path("healthhub.db")
+
+# ── 強化 Argon2 參數（視主機資源可再上調）
+argon2 = _argon2.using(time_cost=3, memory_cost=102400, parallelism=8)
 
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
 
 def init_db():
@@ -29,7 +34,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS blood_pressure (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
-        datetime TEXT NOT NULL,
+        datetime TEXT NOT NULL,           -- UTC ISO8601，例如 2025-10-15T01:23:45Z
         systolic REAL NOT NULL,
         diastolic REAL NOT NULL,
         pulse REAL NOT NULL,
@@ -38,10 +43,11 @@ def init_db():
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     """)
-    # 舊表升級容錯（若缺欄位就補）
+
+    # 舊表升級容錯：若缺欄位就補；不再強制指定 user_id=1（避免外洩）
     try:
         conn.execute("ALTER TABLE blood_pressure ADD COLUMN user_id INTEGER;")
-        conn.execute("UPDATE blood_pressure SET user_id = 1 WHERE user_id IS NULL;")
+        # 不自動 UPDATE。未歸戶資料將不會被 list_bp() 查詢到。
     except Exception:
         pass
     conn.commit()
@@ -49,26 +55,18 @@ def init_db():
 
 # ---------- 密碼雜湊：新帳號一律 Argon2；相容舊 bcrypt / bcrypt_sha256 ----------
 def _hash_password(password: str) -> str:
-    # Argon2 沒有 72 bytes 限制
     return argon2.hash(password)
 
 def _identify_scheme(ph: str) -> str:
-    # 回傳 'argon2' / 'bcrypt_sha256' / 'bcrypt' / 'unknown'
     try:
-        if argon2.identify(ph):
-            return "argon2"
-    except Exception:
-        pass
+        if argon2.identify(ph): return "argon2"
+    except Exception: pass
     try:
-        if bcrypt_sha256.identify(ph):
-            return "bcrypt_sha256"
-    except Exception:
-        pass
+        if bcrypt_sha256.identify(ph): return "bcrypt_sha256"
+    except Exception: pass
     try:
-        if bcrypt.identify(ph):
-            return "bcrypt"
-    except Exception:
-        pass
+        if bcrypt.identify(ph): return "bcrypt"
+    except Exception: pass
     return "unknown"
 
 def _verify_password(password: str, password_hash: str) -> bool:
@@ -94,14 +92,13 @@ def maybe_upgrade_password(user_id: int, password: str, password_hash: str):
             conn.commit()
             conn.close()
         except Exception:
-            # 升級失敗不阻斷登入流程
-            pass
+            pass  # 升級失敗不阻斷登入流程
 
 # ---------- 使用者 ----------
 def create_user(email: str, name: str, password: str) -> int:
     email = (email or "").strip().lower()
     name = (name or "").strip() or email.split("@")[0]
-    if len(password) < 6:
+    if len(password) < 10:
         raise ValueError("Password too short")
     ph = _hash_password(password)  # Argon2
     conn = get_conn()
@@ -167,19 +164,16 @@ def delete_bp(user_id: int, ids: Iterable[int]):
 
 def list_bp(user_id: int, start_iso: Optional[str]=None, end_iso: Optional[str]=None) -> pd.DataFrame:
     conn = get_conn()
+    base_sql = """
+        SELECT id, datetime, systolic, diastolic, pulse, meds, note
+        FROM blood_pressure
+        WHERE user_id = ?
+    """
+    params = [user_id]
     if start_iso and end_iso:
-        df = pd.read_sql_query("""
-            SELECT id, datetime, systolic, diastolic, pulse, meds, note
-            FROM blood_pressure
-            WHERE user_id = ? AND datetime BETWEEN ? AND ?
-            ORDER BY datetime
-        """, conn, params=(user_id, start_iso, end_iso))
-    else:
-        df = pd.read_sql_query("""
-            SELECT id, datetime, systolic, diastolic, pulse, meds, note
-            FROM blood_pressure
-            WHERE user_id = ?
-            ORDER BY datetime
-        """, conn, params=(user_id,))
+        base_sql += " AND datetime BETWEEN ? AND ?"
+        params += [start_iso, end_iso]
+    base_sql += " ORDER BY datetime"
+    df = pd.read_sql_query(base_sql, conn, params=params)
     conn.close()
     return df
