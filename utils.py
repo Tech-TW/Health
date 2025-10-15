@@ -1,108 +1,162 @@
 # utils.py
-import streamlit as st
-import pandas as pd
-import numpy as np
+from __future__ import annotations
+from typing import Dict, Any, Tuple
+from io import BytesIO
 from datetime import datetime
-from dateutil import tz
+import pandas as pd
 
-TZ = tz.gettz("Asia/Taipei")
+# Streamlit 僅在需要時導入（避免某些離線工具調用時報錯）
+try:
+    import streamlit as st
+except Exception:  # pragma: no cover
+    st = None  # 允許在無 Streamlit 情境下匯入 utils
 
-def init_state():
-    if "cfg" not in st.session_state:
-        st.session_state.cfg = {"blood_pressure": default_cfg_bp()}
+# ----------------------------
+# 時區設定
+# ----------------------------
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # Python < 3.9 可改用 backports.zoneinfo
+    from backports.zoneinfo import ZoneInfo  # type: ignore
 
-def export_csv(df: pd.DataFrame) -> bytes:
-    buf = df.copy()
-    if "datetime" in buf.columns:
-        buf["datetime"] = pd.to_datetime(buf["datetime"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
-    return buf.to_csv(index=False).encode("utf-8")
+def _get_local_tz() -> ZoneInfo:
+    """
+    取得顯示用本地時區：
+    1) 優先讀 st.secrets["TZ"]
+    2) 其次讀環境變數 TZ
+    3) 最後預設 Asia/Taipei
+    """
+    default_name = "Asia/Taipei"
+    tz_name = None
+    if st and getattr(st, "secrets", None):
+        tz_name = st.secrets.get("TZ", None)
+    if not tz_name:
+        import os
+        tz_name = os.environ.get("TZ", None)
+    tz_name = tz_name or default_name
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo("UTC")
 
-def parse_local_datetime(date_val, time_val) -> datetime:
-    return datetime.combine(date_val, time_val).replace(tzinfo=TZ)
+TZ: ZoneInfo = _get_local_tz()
+UTC: ZoneInfo = ZoneInfo("UTC")
 
-def default_cfg_bp():
-    return dict(
-        normal_sys=120, normal_dia=80,
-        elevated_sys_low=120, elevated_sys_high=129,
-        stage1_sys_low=130, stage1_sys_high=139,
-        stage1_dia_low=80,  stage1_dia_high=89,
-        stage2_sys=140, stage2_dia=90,
-        crisis_sys=180, crisis_dia=120,
-        target_sys=130, target_dia=80,
-    )
 
-def pulse_pressure(sys, dia):
-    if pd.isna(sys) or pd.isna(dia): return np.nan
-    return float(sys) - float(dia)
+# ----------------------------
+# App 狀態初始化
+# ----------------------------
+def init_state() -> None:
+    """
+    統一初始化 session_state 所需的 key。
+    - cfg: 放各模組設定（含血壓目標值）
+    - lang: 語系（交給 i18n 控制，這裡只設初值）
+    """
+    if st is None:
+        return
+    ss = st.session_state
+    if "cfg" not in ss:
+        ss["cfg"] = {}
+    # 預設語系（若 i18n 已設定會覆蓋）
+    if "lang" not in ss:
+        ss["lang"] = "zh-TW"
+    # 初始化血壓設定（若不存在）
+    bp_cfg = ss["cfg"].get("blood_pressure")
+    if not bp_cfg:
+        ss["cfg"]["blood_pressure"] = default_cfg_bp()
 
-def mean_arterial_pressure(sys, dia):
-    if pd.isna(sys) or pd.isna(dia): return np.nan
-    return (float(sys) + 2 * float(dia)) / 3.0
 
-def bp_category(sys, dia, cfg):
-    if np.isnan(sys) or np.isnan(dia): return ("未知", 0)
-    if sys >= cfg["crisis_sys"] or dia >= cfg["crisis_dia"]: return ("⚠️ 高血壓危急", 4)
-    if sys < cfg["normal_sys"] and dia < cfg["normal_dia"]:  return ("正常", 1)
-    if cfg["elevated_sys_low"] <= sys <= cfg["elevated_sys_high"] and dia < cfg["normal_dia"]: return ("升高", 2)
-    if (cfg["stage1_sys_low"] <= sys <= cfg["stage1_sys_high"]) or (cfg["stage1_dia_low"] <= dia <= cfg["stage1_dia_high"]): return ("第 1 期", 3)
-    if sys >= cfg["stage2_sys"] or dia >= cfg["stage2_dia"]: return ("第 2 期", 4)
-    return ("第 1 期", 3)
+# ----------------------------
+# 檔案輸出工具
+# ----------------------------
+def export_csv(df: pd.DataFrame, filename_prefix: str = "export") -> Tuple[bytes, str]:
+    """
+    將 DataFrame 匯出為 UTF-8 CSV bytes 與建議檔名。
+    儲存時一律加入 UTC 時間戳，避免覆蓋與混淆。
+    """
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    name = f"{filename_prefix}_{ts}.csv"
+    data = df.to_csv(index=False).encode("utf-8")
+    return data, name
 
+
+# ----------------------------
+# 模組預設設定
+# ----------------------------
+def default_cfg_bp() -> Dict[str, Any]:
+    """
+    血壓模組預設設定。
+    - target_sys: 建議 130（可在 UI 自行調整）
+    - target_dia: 建議 80
+    """
+    return {
+        "target_sys": 130,
+        "target_dia": 80,
+    }
+
+
+# ----------------------------
+# 資料增豐：血壓衍生欄位
+# ----------------------------
 def enrich_bp(df: pd.DataFrame) -> pd.DataFrame:
     """
-    穩健版：
-    1) 無論 datetime 是 naive 或 tz-aware，都會先轉成 tz-aware UTC
-    2) 計算衍生欄位：脈壓(pp)、平均動脈壓(map)、分類(category/cat_level)
-    3) 不做本地時區顯示（顯示時再在頁面上 tz_convert(TZ)）
+    穩健版 enrich：
+    1) 將 datetime 欄位統一轉為 tz-aware 的 UTC（無論原本是 naive 或 tz-aware）
+       - pd.to_datetime(series, utc=True) 會：
+         * 將 naive 視為本地時間？→ 官方行為：直接標記為 UTC（不做位移）
+         * 將 tz-aware 自動轉為 UTC
+       若你的舊資料「其實是本地時間（TZ）」但寫成 naive，建議先在匯入前轉換，
+       或在此函式自訂行為。為維持泛用性，此處採「一律標記/轉成 UTC」的策略。
+    2) 轉型數值欄位，計算：
+       - pp（脈壓）= systolic - diastolic
+       - map（平均動脈壓）= diastolic + pp / 3
+    3) 依常見門檻建立分類 category / cat_level（可自行調整門檻）
+    4) 依 datetime 排序，回傳新 DataFrame
     """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=[
+            "id", "datetime", "systolic", "diastolic", "pulse", "pp", "map", "category", "cat_level", "meds", "note"
+        ])
+
     out = df.copy()
 
-    # ---- 1) 轉成 tz-aware UTC ----
-    # 先 parse 成 timestamp；如果已 tz-aware -> 直接轉 UTC；如果是 naive -> 當成 UTC 再加 tz
-    out["datetime"] = pd.to_datetime(out["datetime"], errors="coerce")
+    # --- 1) 統一時間成 tz-aware 的 UTC ---
+    # 對混雜（naive + tz-aware）也能一次處理
+    out["datetime"] = pd.to_datetime(out["datetime"], utc=True, errors="coerce")
 
-    # 兩段處理：tz-aware 與 naive 分開
-    mask_tzaware = out["datetime"].dt.tz.notna()
-    if mask_tzaware.any():
-        out.loc[mask_tzaware, "datetime"] = out.loc[mask_tzaware, "datetime"].dt.tz_convert("UTC")
-
-    mask_naive = out["datetime"].dt.tz.isna()
-    if mask_naive.any():
-        # 將 naive 視為 UTC 時間再補上 tz（若你舊資料其實是本地時間，改成 tz_localize(TZ).dt.tz_convert("UTC")）
-        out.loc[mask_naive, "datetime"] = (
-            out.loc[mask_naive, "datetime"].dt.tz_localize(TZ).dt.tz_convert("UTC")
-        )
-
-    # ---- 2) 衍生欄位 ----
-    # 脈壓（Pulse Pressure）與平均動脈壓（Mean Arterial Pressure）
-    # 確保數值欄位為數字
-    for col in ["systolic", "diastolic", "pulse"]:
+    # --- 2) 數值欄位轉型 ---
+    for col in ("systolic", "diastolic", "pulse"):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
+    # 衍生欄位
     out["pp"] = out["systolic"] - out["diastolic"]
     out["map"] = out["diastolic"] + (out["pp"] / 3.0)
 
-    # 分類（可以依你的門檻調整）
-    def _cat(row):
-        s, d = row["systolic"], row["diastolic"]
+    # --- 3) 分類 ---
+    def _bp_category(s: float, d: float) -> tuple[str, int]:
         if pd.isna(s) or pd.isna(d):
-            return "Unknown", 99
-        # 這裡示範一組常見分級（可依需求調整）
+            return ("Unknown", 99)
+        # 常見分級（可依需求微調）
         if s < 120 and d < 80:
-            return "Normal", 0
+            return ("Normal", 0)
         if 120 <= s < 130 and d < 80:
-            return "Elevated", 1
+            return ("Elevated", 1)
         if (130 <= s < 140) or (80 <= d < 90):
-            return "Hypertension Stage 1", 2
-        if (140 <= s) or (90 <= d):
-            return "Hypertension Stage 2", 3
-        return "Unknown", 99
+            return ("Hypertension Stage 1", 2)
+        if (s >= 140) or (d >= 90):
+            return ("Hypertension Stage 2", 3)
+        return ("Unknown", 99)
 
-    cats = out.apply(_cat, axis=1, result_type="expand")
+    cats = out.apply(lambda r: _bp_category(r.get("systolic"), r.get("diastolic")), axis=1, result_type="expand")
     out["category"] = cats[0]
-    out["cat_level"] = cats[1]
+    out["cat_level"] = pd.to_numeric(cats[1], errors="coerce")
 
-    # 確保依時間排序
-    out = out.sort_values("datetime").reset_index(drop=True)
+    # 若缺必要欄位，補齊空欄，避免後續 UI 報 KeyError
+    for col in ("meds", "note"):
+        if col not in out.columns:
+            out[col] = ""
+
+    # --- 4) 依時間排序 ---
+    out = out.sort_values("datetime", kind="mergesort").reset_index(drop=True)
     return out
