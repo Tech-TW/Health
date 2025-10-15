@@ -5,5 +5,5 @@ numpy
 python-dateutil
 pytz
 pyyaml
-passlib[bcrypt]
-
+passlib
+argon2-cffi
